@@ -271,6 +271,9 @@ pct exec "$CT_ID" -- bash -c '
 msg_info "Hole Aurelio-Code ($AURELIO_REPO @ $UPSTREAM_REF) ..."
 pct exec "$CT_ID" -- bash -c "
   set -euo pipefail
+  # Repo gehoert User aurelio, git laeuft hier als root -> Ausnahme setzen,
+  # sonst 'fatal: detected dubious ownership' (Exit 128).
+  git config --global --add safe.directory $APP_DIR || true
   if [ -d $APP_DIR/.git ]; then
     git -C $APP_DIR fetch --all --prune
     git -C $APP_DIR checkout $UPSTREAM_REF
