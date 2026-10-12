@@ -229,6 +229,10 @@ pct exec "$CT_ID" -- bash -c '
 msg_info "Installiere Node.js 22 + uv im Container (idempotent) ..."
 pct exec "$CT_ID" -- bash -c '
   set -euo pipefail
+  # pct exec hat einen minimalen PATH (ohne /usr/local/bin) – explizit setzen,
+  # sonst findet die Shell uv trotz erfolgreicher Installation nicht (Exit 127).
+  export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin"
+  export LANG=C.UTF-8 LC_ALL=C.UTF-8
   # Node 22 via NodeSource, falls fehlend oder < 22
   need_node=0
   if ! command -v node >/dev/null 2>&1; then need_node=1;
@@ -240,14 +244,18 @@ pct exec "$CT_ID" -- bash -c '
     apt-get install -y nodejs
   fi
   node -v; npm -v
-  # uv via offizieller Installer, falls fehlend
-  if ! command -v uv >/dev/null 2>&1 && [ ! -x /root/.local/bin/uv ]; then
+  # uv via offizieller Installer, falls nirgends vorhanden
+  UV_BIN="$(command -v uv || true)"
+  if [ -z "$UV_BIN" ] && [ -x /root/.local/bin/uv ]; then UV_BIN=/root/.local/bin/uv; fi
+  if [ -z "$UV_BIN" ] && [ -x /usr/local/bin/uv ]; then UV_BIN=/usr/local/bin/uv; fi
+  if [ -z "$UV_BIN" ]; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
+    UV_BIN=/root/.local/bin/uv
   fi
-  if [ -x /root/.local/bin/uv ] && [ ! -e /usr/local/bin/uv ]; then
-    ln -sf /root/.local/bin/uv /usr/local/bin/uv
-  fi
-  uv --version
+  [ -x "$UV_BIN" ] || { echo "FEHLER: uv fehlt nach Installation ($UV_BIN nicht ausfuehrbar)" >&2; exit 1; }
+  ln -sf "$UV_BIN" /usr/local/bin/uv
+  hash -r
+  /usr/local/bin/uv --version
 '
 
 msg_info "Hole Aurelio-Code ($AURELIO_REPO @ $UPSTREAM_REF) ..."
@@ -279,8 +287,10 @@ pct exec "$CT_ID" -- bash -c '
 msg_info "Installiere Backend-Deps (uv sync, holt Python 3.12 bei Bedarf) ..."
 pct exec "$CT_ID" -- bash -c '
   set -euo pipefail
+  export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin"
+  export LANG=C.UTF-8 LC_ALL=C.UTF-8
   cd /opt/aurelio/backend
-  uv sync
+  /usr/local/bin/uv sync
   test -x /opt/aurelio/backend/.venv/bin/python || { echo "FEHLER: .venv fehlt nach uv sync" >&2; exit 1; }
   /opt/aurelio/backend/.venv/bin/python -c "import fastapi, uvicorn; print(fastapi.__version__)"
   # .env aus Vorlage anlegen (Key optional, Datei bleibt sonst leer konfigurierbar)
