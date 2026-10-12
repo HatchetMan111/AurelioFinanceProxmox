@@ -40,6 +40,7 @@ APP_USER="aurelio"
 APP_DIR="/opt/aurelio"
 BACKEND_DIR="/opt/aurelio/backend"
 VENV_PYTHON="/opt/aurelio/backend/.venv/bin/python"
+INSTALLER_REV="2026-10-12c"                          # Bei jedem Fix erhoehen – steht im Log, damit klar ist, welche Revision lief
 
 # Umgebungs-Overrides: CT_ID=150 CORES=2 RAM=4096 DISK=12 ./aurelio.sh
 CT_ID_ARG="${CT_ID:-${CTID:-}}"
@@ -69,6 +70,7 @@ msg_error() { echo -e "${C_RED}[ERROR]${C_RESET} $*" >&2; }
 # Vollstaendige Ausgabe ins Log (komplette Kette, nicht nur letzte Zeile)
 exec > >(tee -i "$LOG_FILE") 2>&1
 msg_info "Logdatei: $LOG_FILE"
+msg_info "Installer-Revision: $INSTALLER_REV (Upstream $AURELIO_REPO @ $AURELIO_REF)"
 [[ "$DEBUG" == "1" ]] && { echo "--- DEBUG: set -x aktiv ---"; set -x; }
 
 # Bei Fehlern: komplette Kette ausgeben (Befehl, Zeile, Exit-Code, Log-Verweis)
@@ -263,13 +265,19 @@ pct exec "$CT_ID" -- bash -c '
   # Als echte Datei nach /usr/local/bin kopieren (KEIN Symlink): das Binary
   # liegt ggf. unter /root/.local/bin – fuer User aurelio unbetretbar, und ein
   # Symlink dorthin stuerbe beim su-Wechsel mit Permission denied (Exit 126).
+  # --remove-destination: falls das Ziel (noch) ein Symlink ist, wird er ersetzt
+  # statt ihm zu folgen (sonst blaebe der Symlink bestehen).
   if [ "$UV_BIN" != "/usr/local/bin/uv" ]; then
     rm -f /usr/local/bin/uv
-    cp -f "$UV_BIN" /usr/local/bin/uv
+    cp -f --remove-destination "$UV_BIN" /usr/local/bin/uv
     chmod 755 /usr/local/bin/uv
   fi
   hash -r
   /usr/local/bin/uv --version
+  ls -l /usr/local/bin/uv
+  # Fail-fast als aurelio: spaetere Schritte (uv sync, Service) brauchen das Binary als aurelio.
+  su -s /bin/bash aurelio -c "/usr/local/bin/uv --version" \
+    || { echo "FEHLER: /usr/local/bin/uv ist fuer User aurelio nicht ausfuehrbar (ls -l oben pruefen)" >&2; exit 1; }
 '
 
 msg_info "Hole Aurelio-Code ($AURELIO_REPO @ $UPSTREAM_REF) ..."
