@@ -245,15 +245,25 @@ pct exec "$CT_ID" -- bash -c '
   fi
   node -v; npm -v
   # uv via offizieller Installer, falls nirgends vorhanden
+  # Kaputte Symlinks aus frueheren Laeufen (z. B. Selbst-Loop) aufraeumen
+  if [ -L /usr/local/bin/uv ] && [ ! -x /usr/local/bin/uv ]; then
+    rm -f /usr/local/bin/uv
+  fi
   UV_BIN="$(command -v uv || true)"
-  if [ -z "$UV_BIN" ] && [ -x /root/.local/bin/uv ]; then UV_BIN=/root/.local/bin/uv; fi
-  if [ -z "$UV_BIN" ] && [ -x /usr/local/bin/uv ]; then UV_BIN=/usr/local/bin/uv; fi
-  if [ -z "$UV_BIN" ]; then
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    UV_BIN=/root/.local/bin/uv
+  if [ -n "$UV_BIN" ]; then UV_BIN="$(readlink -f "$UV_BIN" 2>/dev/null || echo "$UV_BIN")"; fi
+  if [ -z "$UV_BIN" ] || [ ! -x "$UV_BIN" ]; then
+    if [ -x /root/.local/bin/uv ]; then UV_BIN=/root/.local/bin/uv;
+    elif [ -x /usr/local/bin/uv ]; then UV_BIN=/usr/local/bin/uv;
+    else
+      curl -LsSf https://astral.sh/uv/install.sh | sh
+      UV_BIN=/root/.local/bin/uv
+    fi
   fi
   [ -x "$UV_BIN" ] || { echo "FEHLER: uv fehlt nach Installation ($UV_BIN nicht ausfuehrbar)" >&2; exit 1; }
-  ln -sf "$UV_BIN" /usr/local/bin/uv
+  # Nur verlinken, wenn Ziel != Link (sonst Selbst-Loop mit ELOOP/Exit 126)
+  if [ "$UV_BIN" != "/usr/local/bin/uv" ]; then
+    ln -sf "$UV_BIN" /usr/local/bin/uv
+  fi
   hash -r
   /usr/local/bin/uv --version
 '
