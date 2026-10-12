@@ -280,29 +280,45 @@ pct exec "$CT_ID" -- bash -c "
     git clone --branch $UPSTREAM_REF --depth 1 $AURELIO_REPO $APP_DIR
   fi
   chown -R aurelio:aurelio $APP_DIR
+  # Geteilter, fuer alle lesbarer Ort fuer uv-gemanagte Python-Interpreter
+  # (default waere /root/.local/share/uv – fuer User aurelio unbetretbar -> 203/EXEC).
+  mkdir -p /opt/uv-python
+  chown -R aurelio:aurelio /opt/uv-python
   test -f $BACKEND_DIR/app/main.py || { echo \"FEHLER: $BACKEND_DIR/app/main.py fehlt (Upstream-Layout geaendert?)\" >&2; exit 1; }
   test -f $APP_DIR/frontend/package.json || { echo \"FEHLER: frontend/package.json fehlt\" >&2; exit 1; }
 "
 
-msg_info "Baue Frontend (npm ci + npm run build, dauert Minuten) ..."
+msg_info "Baue Frontend als User aurelio (npm ci + npm run build, dauert Minuten) ..."
 pct exec "$CT_ID" -- bash -c '
   set -euo pipefail
-  cd /opt/aurelio/frontend
-  if [ ! -d node_modules ]; then npm ci || npm install; fi
-  npm run build
+  export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  export LANG=C.UTF-8 LC_ALL=C.UTF-8 HOME=/home/aurelio
+  chown -R aurelio:aurelio /opt/aurelio
+  su -s /bin/bash aurelio -c "cd /opt/aurelio/frontend && ([ -d node_modules ] || npm ci || npm install) && npm run build"
   test -d /opt/aurelio/frontend/dist || { echo "FEHLER: frontend/dist fehlt nach npm run build" >&2; exit 1; }
   chown -R aurelio:aurelio /opt/aurelio/frontend
 '
 
-msg_info "Installiere Backend-Deps (uv sync, holt Python 3.12 bei Bedarf) ..."
+msg_info "Installiere Backend-Deps als User aurelio (uv sync, holt Python 3.12 bei Bedarf) ..."
 pct exec "$CT_ID" -- bash -c '
   set -euo pipefail
   export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin"
-  export LANG=C.UTF-8 LC_ALL=C.UTF-8
-  cd /opt/aurelio/backend
-  /usr/local/bin/uv sync
+  export LANG=C.UTF-8 LC_ALL=C.UTF-8 HOME=/home/aurelio UV_PYTHON_INSTALL_DIR=/opt/uv-python
+  mkdir -p /opt/uv-python
+  chown -R aurelio:aurelio /opt/uv-python /opt/aurelio
+  # .venv aus frueheren Root-Laeufen zeigt nach /root (fuer aurelio unlesbar,
+  # Service stuerbe mit 203/EXEC) -> verwerfen, als aurelio neu aufbauen.
+  if [ -d /opt/aurelio/backend/.venv ]; then
+    owner="$(stat -c %U /opt/aurelio/backend/.venv)"
+    target="$(readlink -f /opt/aurelio/backend/.venv/bin/python 2>/dev/null || true)"
+    if [ "$owner" != "aurelio" ] || [[ "$target" == /root/* ]]; then
+      echo "Bestehende .venv (Owner: $owner, Python: $target) wird als aurelio neu aufgebaut ..."
+      rm -rf /opt/aurelio/backend/.venv
+    fi
+  fi
+  su -s /bin/bash aurelio -c "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/aurelio UV_PYTHON_INSTALL_DIR=/opt/uv-python; cd /opt/aurelio/backend && /usr/local/bin/uv sync"
   test -x /opt/aurelio/backend/.venv/bin/python || { echo "FEHLER: .venv fehlt nach uv sync" >&2; exit 1; }
-  /opt/aurelio/backend/.venv/bin/python -c "import fastapi, uvicorn; print(fastapi.__version__)"
+  su -s /bin/bash aurelio -c "cd /opt/aurelio/backend && .venv/bin/python -c \"import fastapi, uvicorn; print(fastapi.__version__)\""
   # .env aus Vorlage anlegen (Key optional, Datei bleibt sonst leer konfigurierbar)
   if [ ! -f /opt/aurelio/backend/.env ] && [ -f /opt/aurelio/backend/.env.example ]; then
     cp /opt/aurelio/backend/.env.example /opt/aurelio/backend/.env
