@@ -58,10 +58,17 @@ Erwartete Schlussausgabe (Beispiel):
 ══════════════════════════════════════════════════════════
 ```
 
-## KI-Chat (optional)
+## KI-Chat (optional, OpenRouter-Key)
 
-1. Key unter `https://openrouter.ai/keys` erstellen.
-2. Im Container `/opt/aurelio/backend/.env` setzen (`OPENROUTER_API_KEY=...`), dann `systemctl restart aurelio`.
+Der Installer fragt den Key während der Installation ab (maskiert, 120s Timeout, Enter = überspringen). Er landet per Datei-Übergabe in `/opt/aurelio/backend/.env` – nie im Log, nie in der Ausgabe. Alternativen für Automation:
+
+```bash
+OPENROUTER_API_KEY=sk-or-... bash aurelio.sh --ctid 100   # per Env
+bash aurelio.sh --ctid 100 --openrouter-key sk-or-...     # per Flag
+bash aurelio.sh --ctid 100 --no-input                     # nie nachfragen
+```
+
+Später nachtragen: Key in `/opt/aurelio/backend/.env` als `OPENROUTER_API_KEY=...` setzen (Datei gehört `aurelio`, Modus 640), dann `pct exec <CT> -- systemctl restart aurelio`. Key unter `https://openrouter.ai/keys` erstellen.
 
 ## Reboot-Test (Reboot-sicher belegen)
 

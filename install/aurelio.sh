@@ -40,7 +40,7 @@ APP_USER="aurelio"
 APP_DIR="/opt/aurelio"
 BACKEND_DIR="/opt/aurelio/backend"
 VENV_PYTHON="/opt/aurelio/backend/.venv/bin/python"
-INSTALLER_REV="2026-10-12c"                          # Bei jedem Fix erhoehen – steht im Log, damit klar ist, welche Revision lief
+INSTALLER_REV="2026-10-12d"                          # Bei jedem Fix erhoehen – steht im Log, damit klar ist, welche Revision lief
 
 # Umgebungs-Overrides: CT_ID=150 CORES=2 RAM=4096 DISK=12 ./aurelio.sh
 CT_ID_ARG="${CT_ID:-${CTID:-}}"
@@ -48,6 +48,8 @@ CORES_ARG="${CORES:-$DEFAULT_CORES}"
 RAM_ARG="${RAM:-$DEFAULT_RAM}"
 DISK_ARG="${DISK:-$DEFAULT_DISK}"
 REF_ARG="${REF:-$AURELIO_REF}"
+OPENROUTER_KEY_ARG="${OPENROUTER_API_KEY:-}"       # optional: Key per Env setzen, sonst Abfrage
+NO_INPUT="${NO_INPUT:-0}"                          # 1 = nie interaktiv nachfragen (Automation)
 
 DEBUG="${DEBUG:-0}"
 LOG_FILE="/tmp/${APP}-install-$(date +%F-%H%M%S).log"
@@ -97,6 +99,8 @@ Optionen:
   --ref REF            Upstream-Ref (Branch/Tag/Commit, Default: ${AURELIO_REF})
   --password PW        Root-Passwort (Default: zufaellig generiert, wird angezeigt)
   --ssh-key PATH       SSH Public Key in den Container uebernehmen (optional)
+  --openrouter-key KEY OpenRouter-Key (alternativ Env OPENROUTER_API_KEY oder Abfrage)
+  --no-input           nie interaktiv nachfragen (fuer Automation)
   --debug              bash -x + maximale Fehlermeldungskette
   -h, --help           diese Hilfe
 EOF
@@ -106,6 +110,7 @@ EOF
 # Argumente
 # ---------------------------------------------------------------------------
 CT_ID="$CT_ID_ARG" HOSTNAME_ARG="$APP" CORES="$CORES_ARG" RAM="$RAM_ARG" DISK="$DISK_ARG" UPSTREAM_REF="$REF_ARG"
+OPENROUTER_KEY="$OPENROUTER_KEY_ARG"
 STORAGE_ARG="" TEMPLATE_STORE="$DEFAULT_TEMPLATE_STORE" BRIDGE="$DEFAULT_BRIDGE"
 PASSWORD_ARG="" SSH_KEY_ARG=""
 while [[ $# -gt 0 ]]; do
@@ -121,6 +126,8 @@ while [[ $# -gt 0 ]]; do
     --ref) UPSTREAM_REF="$2"; shift 2;;
     --password) PASSWORD_ARG="$2"; shift 2;;
     --ssh-key) SSH_KEY_ARG="$2"; shift 2;;
+    --openrouter-key) OPENROUTER_KEY="$2"; shift 2;;
+    --no-input) NO_INPUT="1"; shift;;
     --debug) DEBUG="1"; set -x; shift;;
     -h|--help) usage; exit 0;;
     *) msg_error "Unbekannte Option: $1"; usage; exit 1;;
@@ -209,6 +216,35 @@ for i in $(seq 1 24); do
 done
 [[ -n "${CT_IP:-}" ]] || { msg_error "Keine Container-IP (pct exec hostname -I). Netzwerk/Bridge pruefen."; exit 1; }
 msg_ok "Container-IP: $CT_IP"
+
+# ---------------------------------------------------------------------------
+# 3b. OpenRouter-Key (optional, nur Chat/Analyse): Env/Flag > Abfrage > leer.
+# Der Key wird maskiert eingelesen (read -s, 120s Timeout) und per Datei in den
+# Container uebergeben – er steht nie in argv/ps, nie im Log, nie in der
+# Schlussausgabe. Ohne TTY (Automation) wird still uebersprungen, ausser per
+# Env OPENROUTER_API_KEY oder --openrouter-key gesetzt.
+# ---------------------------------------------------------------------------
+if [[ -z "$OPENROUTER_KEY" && "$NO_INPUT" != "1" ]]; then
+  if [[ -t 0 ]] || [[ -r /dev/tty ]]; then
+    printf '%s' "OpenRouter API-Key (optional, nur KI-Chat/Analyse – Enter = ueberspringen): "
+    OPENROUTER_KEY=""
+    IFS= read -rs -t 120 OPENROUTER_KEY </dev/tty 2>/dev/null || true
+    echo ""
+  fi
+fi
+KEY_PUSHED="0"
+if [[ -n "$OPENROUTER_KEY" ]]; then
+  KEY_TMP="$(mktemp)"
+  chmod 600 "$KEY_TMP"
+  printf '%s' "$OPENROUTER_KEY" > "$KEY_TMP"
+  pct push "$CT_ID" "$KEY_TMP" /tmp/aurelio_openrouter_key
+  rm -f "$KEY_TMP"
+  unset OPENROUTER_KEY
+  KEY_PUSHED="1"
+  msg_ok "OpenRouter-Key entgegengenommen (geht per Datei in die Container-.env)."
+else
+  msg_info "Kein OpenRouter-Key – KI-Chat bleibt deaktiviert (spaeter nachtragbar)."
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Aurelio im Container (via pct exec, idempotent)
@@ -334,9 +370,38 @@ pct exec "$CT_ID" -- bash -c '
   su -s /bin/bash aurelio -c "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/aurelio UV_PYTHON_INSTALL_DIR=/opt/uv-python; cd /opt/aurelio/backend && /usr/local/bin/uv sync"
   test -x /opt/aurelio/backend/.venv/bin/python || { echo "FEHLER: .venv fehlt nach uv sync" >&2; exit 1; }
   su -s /bin/bash aurelio -c "cd /opt/aurelio/backend && .venv/bin/python -c \"import fastapi, uvicorn; print(fastapi.__version__)\""
-  # .env aus Vorlage anlegen (Key optional, Datei bleibt sonst leer konfigurierbar)
+  # .env: Vorlage anlegen falls fehlend, per Datei uebergebenen Key einpflegen.
+  # Der Key steht nie in argv/ps/Logs – nur der Dateipfad wird uebergeben, das
+  # Einpflegen macht Python (Sonderzeichen im Key sind damit unkritisch).
   if [ ! -f /opt/aurelio/backend/.env ] && [ -f /opt/aurelio/backend/.env.example ]; then
     cp /opt/aurelio/backend/.env.example /opt/aurelio/backend/.env
+  fi
+  if [ -f /tmp/aurelio_openrouter_key ]; then
+    chmod 600 /tmp/aurelio_openrouter_key
+    /opt/aurelio/backend/.venv/bin/python - /tmp/aurelio_openrouter_key /opt/aurelio/backend/.env <<'PYEOF'
+import os, sys
+kf, ef = sys.argv[1], sys.argv[2]
+with open(kf, encoding="utf-8") as f:
+    key = f.read().strip()
+os.remove(kf)
+lines = []
+if os.path.exists(ef):
+    with open(ef, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+out, found = [], False
+for ln in lines:
+    if ln.startswith("OPENROUTER_API_KEY="):
+        out.append("OPENROUTER_API_KEY=" + key)
+        found = True
+    else:
+        out.append(ln)
+if not found:
+    out.append("OPENROUTER_API_KEY=" + key)
+with open(ef, "w", encoding="utf-8") as f:
+    f.write("\n".join(out) + "\n")
+PYEOF
+    chmod 640 /opt/aurelio/backend/.env
+    echo "OpenRouter-Key in backend/.env eingepflegt (Wert wird nicht angezeigt)."
   fi
   chown -R aurelio:aurelio /opt/aurelio
 '
@@ -375,6 +440,10 @@ UNIT
 fi
 pct exec "$CT_ID" -- systemctl daemon-reload
 pct exec "$CT_ID" -- systemctl enable --now aurelio
+if [[ "$KEY_PUSHED" == "1" ]]; then
+  msg_info "OpenRouter-Key uebernommen – starte Service neu, damit er aktiv wird ..."
+  pct exec "$CT_ID" -- systemctl restart aurelio
+fi
 
 # ---------------------------------------------------------------------------
 # 5. Verifikation: Service + Web UI
@@ -401,7 +470,12 @@ echo "  Container    : CT $CT_ID (Hostname: $HOSTNAME_ARG, unprivilegiert, onboo
 echo "  Ressourcen   : $CORES vCPU / $RAM MB RAM / $DISK GB Disk"
 echo "  Web UI       : http://${CT_IP}:${APP_PORT}"
 echo "  Health       : http://${CT_IP}:${APP_PORT}/api/health"
-echo "  Hinweis      : Eigene Daten in backend/data.db; KI-Chat optional per OPENROUTER_API_KEY in /opt/aurelio/backend/.env"
+echo "  Hinweis      : Eigene Daten in backend/data.db; KI-Chat/Analyse brauchen OPENROUTER_API_KEY in /opt/aurelio/backend/.env"
+if [[ "$KEY_PUSHED" == "1" ]]; then
+  echo "  OpenRouter-Key: gesetzt (in backend/.env, Service neu gestartet)"
+else
+  echo "  OpenRouter-Key: nicht gesetzt – bei Bedarf nachtragen (Prompt/Env/Flag) + pct exec $CT_ID -- systemctl restart aurelio"
+fi
 echo "  Root-Passwort: ${PASSWORD_ARG:-<bestehender CT, unveraendert>} (nur jetzt angezeigt!)"
 echo "  Service      : systemctl status aurelio  (im Container via: pct enter $CT_ID)"
 echo "  Update       : Skript erneut laufen lassen (idempotent, ggf. --ref <Branch/Tag>)"
