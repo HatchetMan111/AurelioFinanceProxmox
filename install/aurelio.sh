@@ -260,9 +260,13 @@ pct exec "$CT_ID" -- bash -c '
     fi
   fi
   [ -x "$UV_BIN" ] || { echo "FEHLER: uv fehlt nach Installation ($UV_BIN nicht ausfuehrbar)" >&2; exit 1; }
-  # Nur verlinken, wenn Ziel != Link (sonst Selbst-Loop mit ELOOP/Exit 126)
+  # Als echte Datei nach /usr/local/bin kopieren (KEIN Symlink): das Binary
+  # liegt ggf. unter /root/.local/bin – fuer User aurelio unbetretbar, und ein
+  # Symlink dorthin stuerbe beim su-Wechsel mit Permission denied (Exit 126).
   if [ "$UV_BIN" != "/usr/local/bin/uv" ]; then
-    ln -sf "$UV_BIN" /usr/local/bin/uv
+    rm -f /usr/local/bin/uv
+    cp -f "$UV_BIN" /usr/local/bin/uv
+    chmod 755 /usr/local/bin/uv
   fi
   hash -r
   /usr/local/bin/uv --version
